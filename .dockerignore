@@ -1,0 +1,9 @@
+.git
+.github
+*.md
+*.png
+*.jpg
+*.svg
+__pycache__
+*.pyc
+.DS_Store
