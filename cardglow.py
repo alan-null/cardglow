@@ -24,6 +24,8 @@ Usage:
     cardglow logo.png --glow "#ff3355"          # force glow color
     cardglow logo.png --gradient-angle 135      # GitHub-style diagonal
     cardglow logo.png --no-grid --no-vignette
+    cardglow logo.png -o card.jpg --quality 80  # compressed JPEG output
+    cardglow logo.png --format webp             # compressed WebP output
 
 Requirements:
     pip install pillow cairosvg numpy
@@ -271,7 +273,15 @@ def parse_size(s: str) -> tuple:
 def main():
     p = argparse.ArgumentParser(prog="cardglow", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("input", help="Path to source logo (.png, .gif, or .svg)")
-    p.add_argument("-o", "--output", default=None, help="Output PNG path (default: <input>-og.png)")
+    p.add_argument("-o", "--output", default=None, help="Output path (default: <input>-og.<format>)")
+    p.add_argument(
+        "--format", choices=["png", "jpeg", "jpg", "webp"], default=None,
+        help="Output image format (default: inferred from -o extension, else png)",
+    )
+    p.add_argument(
+        "--quality", type=int, default=85,
+        help="Compression quality for jpeg/webp, 1-100 (default: 85). Ignored for png.",
+    )
     p.add_argument("--size", default="1200x630", help="Canvas size, e.g. 1200x630 (default)")
     p.add_argument("--icon-size", type=int, default=300, help="Max logo dimension in px (default: 300)")
     p.add_argument("--bg-top", default="0d1117", help="Top gradient color, hex (default: 0d1117)")
@@ -299,7 +309,11 @@ def main():
     p.add_argument("--svg-render-px", type=int, default=1000, help="Rasterization size for SVG input (default: 1000)")
     args = p.parse_args()
 
-    out_path = args.output or (os.path.splitext(args.input)[0] + "-og.png")
+    fmt = args.format or (os.path.splitext(args.output)[1].lstrip(".").lower() if args.output else "png")
+    fmt = {"jpg": "jpeg"}.get(fmt, fmt)
+    if fmt not in ("png", "jpeg", "webp"):
+        fmt = "png"
+    out_path = args.output or (os.path.splitext(args.input)[0] + f"-og.{fmt}")
     W, H = parse_size(args.size)
 
     logo = load_source_image(args.input, svg_render_px=args.svg_render_px)
@@ -322,8 +336,16 @@ def main():
         draw_grid=not args.no_grid,
         draw_vignette=not args.no_vignette,
     )
-    card.save(out_path, quality=95)
-    print(f"Saved {out_path}  ({W}x{H})")
+    save_kwargs = {}
+    if fmt == "jpeg":
+        save_kwargs = {"quality": args.quality, "optimize": True, "progressive": True}
+    elif fmt == "webp":
+        save_kwargs = {"quality": args.quality}
+    elif fmt == "png":
+        save_kwargs = {"optimize": True}
+    card.save(out_path, format=fmt.upper(), **save_kwargs)
+    size_kb = os.path.getsize(out_path) / 1024
+    print(f"Saved {out_path}  ({W}x{H}, {fmt}, {size_kb:.0f} KB)")
 
 
 if __name__ == "__main__":
