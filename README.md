@@ -30,6 +30,7 @@ logo's dominant color and tints the background glow to match.
 
 - **PNG / GIF / SVG input** — SVGs are rasterized at high resolution; GIFs use the first frame.
 - **Auto-crop** — trims transparent margins so off-center or padded source art gets re-centered correctly.
+- **Auto background removal** — optionally strip a flat/near-uniform background (e.g. a product photo on white) before compositing, so it doesn't clash with the card's own background.
 - **Auto color-matched glow** — samples the logo's dominant color, no manual hex-picking needed (or override with `--glow`).
 - **Angled gradient background** — CSS `linear-gradient()`-style `--gradient-angle`, dithered to avoid banding on narrow color ranges.
 - **Subtle dot grid, vignette, drop shadow** — the same details that make GitHub's own OG cards feel polished.
@@ -68,9 +69,17 @@ cardglow <input> [options]
   --no-grid               Disable the dot-grid background
   --no-vignette           Disable the corner vignette
   --no-autocrop           Skip auto-cropping transparent margins
+  --transparent           Output the processed logo on a transparent canvas
+                          instead of an OG card (PNG/WebP only)
   --no-dither             Disable gradient dithering
   --dither-strength FLOAT Dither noise amplitude (default: 1.0)
   --svg-render-px PX      SVG rasterization size (default: 1000)
+  --remove-bg             Auto-remove a flat/near-uniform background,
+                          sampled from the image corners, before compositing
+  --bg-tolerance FLOAT    Color-distance tolerance for --remove-bg
+                          (default: 30). Higher removes more shades/noise.
+  --bg-feather FLOAT      Edge feather radius in px for --remove-bg
+                          (default: 2.0, 0 disables softening)
 ```
 
 ### Examples
@@ -90,6 +99,12 @@ cardglow <input> [options]
 
 # Larger logo, custom canvas size
 ./cardglow-docker.sh logo.png --icon-size 400 --size 1280x640
+
+# Product photo on a plain background — strip it before compositing
+./cardglow-docker.sh photo.png --remove-bg
+
+# Remove a flat background and create a transparent 600x600 WebP cutout
+./cardglow-docker.sh photo.png --remove-bg --transparent --size 600x600 --icon-size 600 -o cutout.webp
 ```
 
 ## Building locally

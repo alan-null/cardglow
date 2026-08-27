@@ -26,6 +26,8 @@ Usage:
     cardglow logo.png --no-grid --no-vignette
     cardglow logo.png -o card.jpg --quality 80  # compressed JPEG output
     cardglow logo.png --format webp             # compressed WebP output
+    cardglow photo.png --remove-bg              # auto-remove flat background
+    cardglow photo.png --remove-bg --transparent --size 600x600 -o cutout.webp
 
 Requirements:
     pip install pillow cairosvg numpy
@@ -92,6 +94,61 @@ def autocrop_transparent(im: Image.Image, pad_ratio: float = 0.04) -> Image.Imag
 # ----------------------------------------------------------------------
 # Dominant color extraction (no extra dependency)
 # ----------------------------------------------------------------------
+
+def remove_background(
+    im: Image.Image, tolerance: float = 30.0, feather: float = 2.0,
+    corner_sample: int = 5,
+) -> Image.Image:
+    """Auto-remove a flat/near-uniform background. Samples the average
+    color of the four corners as the presumed background color, then
+    flood-fills outward from the image border across pixels within
+    `tolerance` color-distance of it, making only that border-connected
+    region transparent (so similarly colored patches inside the subject
+    itself are left untouched). `feather` softens the cut edge."""
+    rgba = np.array(im.convert("RGBA"))
+    rgb = rgba[..., :3].astype(np.int16)
+    h, w = rgb.shape[:2]
+
+    cs = max(1, min(corner_sample, h, w))
+    corners = np.concatenate([
+        rgb[0:cs, 0:cs].reshape(-1, 3),
+        rgb[0:cs, w - cs:w].reshape(-1, 3),
+        rgb[h - cs:h, 0:cs].reshape(-1, 3),
+        rgb[h - cs:h, w - cs:w].reshape(-1, 3),
+    ], axis=0)
+    bg_color = corners.mean(axis=0)
+
+    dist = np.sqrt(((rgb - bg_color) ** 2).sum(axis=-1))
+    candidate = dist <= tolerance
+
+    # flood-fill candidate background pixels reachable from the border,
+    # done on a mask image so PIL's fast C flood fill does the work.
+    # .copy() detaches from the numpy buffer — floodfill silently no-ops
+    # on images still backed by shared/array memory.
+    mask_im = Image.fromarray(np.where(candidate, 255, 0).astype(np.uint8), mode="L").copy()
+    mask_px = mask_im.load()
+
+    border_pts = {(x, 0) for x in range(w)} | {(x, h - 1) for x in range(w)}
+    border_pts |= {(0, y) for y in range(h)} | {(w - 1, y) for y in range(h)}
+    for pt in border_pts:
+        if mask_px[pt] == 255:
+            ImageDraw.floodfill(mask_im, pt, 128, thresh=0)
+
+    bg_mask = np.array(mask_im) == 128
+    if not bg_mask.any():
+        return im
+
+    if feather > 0:
+        feather_im = Image.fromarray((bg_mask * 255).astype(np.uint8), mode="L")
+        feather_im = feather_im.filter(ImageFilter.GaussianBlur(feather))
+        bg_frac = np.asarray(feather_im).astype(np.float32) / 255.0
+    else:
+        bg_frac = bg_mask.astype(np.float32)
+
+    alpha = rgba[..., 3].astype(np.float32) * (1.0 - bg_frac)
+    rgba[..., 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    return Image.fromarray(rgba, mode="RGBA")
+
 
 def dominant_color(im: Image.Image) -> tuple:
     """Cheap dominant-color estimate: downsample, quantize to a small
@@ -261,6 +318,22 @@ def make_card(
     return base.convert("RGB")
 
 
+def make_transparent_image(
+    logo: Image.Image, width: int, height: int, icon_max: int,
+) -> Image.Image:
+    """Center a proportionally scaled logo on a transparent canvas."""
+    lw, lh = logo.size
+    scale = icon_max / max(lw, lh)
+    new_w, new_h = max(1, int(lw * scale)), max(1, int(lh * scale))
+    logo_hq = logo.resize((new_w, new_h), Image.LANCZOS)
+
+    output = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    x = (width - new_w) // 2
+    y = (height - new_h) // 2
+    output.paste(logo_hq, (x, y), logo_hq)
+    return output
+
+
 # ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
@@ -306,36 +379,58 @@ def main():
     p.add_argument("--no-grid", action="store_true", help="Disable the dot-grid background")
     p.add_argument("--no-vignette", action="store_true", help="Disable the corner vignette")
     p.add_argument("--no-autocrop", action="store_true", help="Skip auto-cropping transparent margins")
+    p.add_argument(
+        "--transparent", action="store_true",
+        help="Output the processed logo on a transparent canvas instead of a card (PNG/WebP only)",
+    )
     p.add_argument("--svg-render-px", type=int, default=1000, help="Rasterization size for SVG input (default: 1000)")
+    p.add_argument(
+        "--remove-bg", action="store_true",
+        help="Auto-remove a flat/near-uniform background (sampled from the image corners) before compositing",
+    )
+    p.add_argument(
+        "--bg-tolerance", type=float, default=30.0,
+        help="Color-distance tolerance for --remove-bg (default: 30). Higher removes more shades/noise.",
+    )
+    p.add_argument(
+        "--bg-feather", type=float, default=2.0,
+        help="Edge feather radius in px for --remove-bg (default: 2.0, 0 disables softening)",
+    )
     args = p.parse_args()
 
     fmt = args.format or (os.path.splitext(args.output)[1].lstrip(".").lower() if args.output else "png")
     fmt = {"jpg": "jpeg"}.get(fmt, fmt)
     if fmt not in ("png", "jpeg", "webp"):
         fmt = "png"
+    if args.transparent and fmt == "jpeg":
+        p.error("--transparent requires PNG or WebP output; JPEG does not support transparency")
     out_path = args.output or (os.path.splitext(args.input)[0] + f"-og.{fmt}")
     W, H = parse_size(args.size)
 
     logo = load_source_image(args.input, svg_render_px=args.svg_render_px)
+    if args.remove_bg:
+        logo = remove_background(logo, tolerance=args.bg_tolerance, feather=args.bg_feather)
     if not args.no_autocrop:
         logo = autocrop_transparent(logo)
 
-    glow_rgb = hex_to_rgb(args.glow) if args.glow else None
-
-    card = make_card(
-        logo,
-        width=W,
-        height=H,
-        icon_max=args.icon_size,
-        bg_top=hex_to_rgb(args.bg_top),
-        bg_bottom=hex_to_rgb(args.bg_bottom),
-        gradient_angle=args.gradient_angle,
-        dither=not args.no_dither,
-        dither_strength=args.dither_strength,
-        glow_rgb=glow_rgb,
-        draw_grid=not args.no_grid,
-        draw_vignette=not args.no_vignette,
-    )
+    if args.transparent:
+        card = make_transparent_image(logo, W, H, args.icon_size)
+    else:
+        glow_rgb = hex_to_rgb(args.glow) if args.glow else None
+        card = make_card(
+            logo,
+            width=W,
+            height=H,
+            icon_max=args.icon_size,
+            bg_top=hex_to_rgb(args.bg_top),
+            bg_bottom=hex_to_rgb(args.bg_bottom),
+            gradient_angle=args.gradient_angle,
+            dither=not args.no_dither,
+            dither_strength=args.dither_strength,
+            glow_rgb=glow_rgb,
+            draw_grid=not args.no_grid,
+            draw_vignette=not args.no_vignette,
+        )
     save_kwargs = {}
     if fmt == "jpeg":
         save_kwargs = {"quality": args.quality, "optimize": True, "progressive": True}
