@@ -28,8 +28,9 @@ logo's dominant color and tints the background glow to match.
 
 ## Features
 
-- **PNG / GIF / SVG input** — SVGs are rasterized at high resolution; GIFs use the first frame.
+- **PNG / GIF / SVG input** — SVGs are rasterized at high resolution with their aspect ratio preserved; GIFs use the first frame.
 - **Auto-crop** — trims transparent margins so off-center or padded source art gets re-centered correctly.
+- **Precise layout control** — CSS-style `--padding`, `--fit` (contain / cover / width / height) and `--align`, so you can say "fill the full height, 10px from the top and bottom" and get exactly that.
 - **Auto background removal** — optionally strip a flat/near-uniform background (e.g. a product photo on white) before compositing, so it doesn't clash with the card's own background.
 - **Auto color-matched glow** — samples the logo's dominant color, no manual hex-picking needed (or override with `--glow`).
 - **Angled gradient background** — CSS `linear-gradient()`-style `--gradient-angle`, dithered to avoid banding on narrow color ranges.
@@ -59,7 +60,19 @@ cardglow <input> [options]
 
   -o, --output PATH       Output PNG path (default: <input>-og.png)
   --size WxH              Canvas size (default: 1200x630)
-  --icon-size PX          Max logo dimension in px (default: 300)
+  --icon-size PX          Cap the logo's longest side in px
+                          (default: 300, unless --padding/--fit is used)
+  --padding CSS           Inset from the canvas edges, CSS shorthand:
+                          "10", "10 20", "10 20 30", "10 20 30 40"
+                          (top right bottom left). Defines the content box.
+  --fit MODE              How the logo fills the content box:
+                          contain (default, never overflows),
+                          height  (fill the full height),
+                          width   (fill the full width),
+                          cover   (fill both axes, cropping the overflow)
+  --align POS             Placement inside the content box: center (default),
+                          top, bottom, left, right, top-left, top-right,
+                          bottom-left, bottom-right
   --bg-top HEX            Top gradient color (default: 0d1117)
   --bg-bottom HEX         Bottom gradient color (default: 090b0f)
   --gradient-angle DEG    Gradient direction, CSS linear-gradient() style:
@@ -73,7 +86,8 @@ cardglow <input> [options]
                           instead of an OG card (PNG/WebP only)
   --no-dither             Disable gradient dithering
   --dither-strength FLOAT Dither noise amplitude (default: 1.0)
-  --svg-render-px PX      SVG rasterization size (default: 1000)
+  --svg-render-px PX      Minimum SVG rasterization size, longest side
+                          (default: 1000, auto-raised for large canvases)
   --remove-bg             Auto-remove a flat/near-uniform background,
                           sampled from the image corners, before compositing
   --bg-tolerance FLOAT    Color-distance tolerance for --remove-bg
@@ -81,6 +95,32 @@ cardglow <input> [options]
   --bg-feather FLOAT      Edge feather radius in px for --remove-bg
                           (default: 2.0, 0 disables softening)
 ```
+
+### Sizing and positioning
+
+The layout is a simple box model, the same one CSS uses:
+
+1. The **content box** is the canvas minus `--padding`.
+2. `--fit` decides how the logo is scaled into that box.
+3. `--align` decides where it sits inside it.
+4. `--icon-size` optionally caps the result, so a logo never grows past a
+   given size even if the box would allow it.
+
+So "position this icon on a 600×420 canvas, filling the full height, leaving
+10px at the top and bottom" is:
+
+```bash
+./cardglow-docker.sh icon.svg --size 600x420 --padding 10 --fit height --transparent
+```
+
+The rendered logo is exactly 400px tall and starts exactly 10px from the top.
+Note that `--fit height` may overflow horizontally on wide logos — use
+`--fit contain` if you need it to stay inside the box on both axes.
+
+> **Note:** when `--padding` or `--fit` is used, cardglow places the logo at the
+> exact coordinates you asked for. Without them it applies a small upward
+> optical nudge (~3% of the canvas height), which is what makes the default
+> card look balanced.
 
 ### Examples
 
@@ -100,12 +140,37 @@ cardglow <input> [options]
 # Larger logo, custom canvas size
 ./cardglow-docker.sh logo.png --icon-size 400 --size 1280x640
 
+# Fill the full canvas height, 10px clear of the top and bottom edges
+./cardglow-docker.sh logo.svg --size 600x420 --padding 10 --fit height
+
+# Wide margins, logo tucked into the bottom-right corner
+./cardglow-docker.sh logo.png --padding "40 80" --align bottom-right
+
+# Fill the whole canvas, cropping whatever overflows
+./cardglow-docker.sh logo.png --size 600x420 --fit cover
+
 # Product photo on a plain background — strip it before compositing
 ./cardglow-docker.sh photo.png --remove-bg
 
 # Remove a flat background and create a transparent 600x600 WebP cutout
 ./cardglow-docker.sh photo.png --remove-bg --transparent --size 600x600 --icon-size 600 -o cutout.webp
 ```
+
+## Notes on SVG input
+
+SVGs are rasterized before compositing, so the raster resolution matters:
+
+- The **aspect ratio is always preserved** — cardglow rasterizes one axis and
+  lets the renderer derive the other from the source `viewBox`. A 4:1 banner
+  logo stays 4:1.
+- `--svg-render-px` is a **minimum**, not a fixed size. It is automatically
+  raised to roughly 2× the size the logo will actually be drawn at (capped at
+  4096px), so large canvases stay crisp without you having to tune it.
+- An SVG with **no `viewBox` and no intrinsic `width`/`height`** has no aspect
+  ratio for the renderer to work from and may rasterize at an unexpected size.
+  If your output looks wrong, add a `viewBox` to the source SVG.
+- Rasterization still happens *before* scaling, so an SVG is not infinitely
+  resolution-independent here. For very large output, raise `--svg-render-px`.
 
 ## Building locally
 

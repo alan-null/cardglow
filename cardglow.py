@@ -24,6 +24,8 @@ Usage:
     cardglow logo.png --glow "#ff3355"          # force glow color
     cardglow logo.png --gradient-angle 135      # GitHub-style diagonal
     cardglow logo.png --no-grid --no-vignette
+    cardglow logo.svg --size 600x420 --padding 10 --fit height --transparent
+    cardglow logo.png --padding "40 80" --fit contain --align bottom-right
     cardglow logo.png -o card.jpg --quality 80  # compressed JPEG output
     cardglow logo.png --format webp             # compressed WebP output
     cardglow photo.png --remove-bg              # auto-remove flat background
@@ -59,10 +61,14 @@ def load_source_image(path: str, svg_render_px: int = 1000) -> Image.Image:
                 "SVG input requires cairosvg. Install it with:\n"
                 "    pip install cairosvg"
             )
-        png_bytes = cairosvg.svg2png(
-            url=path, output_width=svg_render_px, output_height=svg_render_px
-        )
-        return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        # Pass only one axis so cairosvg derives the other from the viewBox;
+        # forcing both would stretch non-square art to a square.
+        png_bytes = cairosvg.svg2png(url=path, output_width=svg_render_px)
+        im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        if im.height > im.width:
+            png_bytes = cairosvg.svg2png(url=path, output_height=svg_render_px)
+            im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        return im
 
     im = Image.open(path)
     if getattr(im, "is_animated", False):  # GIF: use first frame
@@ -70,7 +76,7 @@ def load_source_image(path: str, svg_render_px: int = 1000) -> Image.Image:
     return im.convert("RGBA")
 
 
-def autocrop_transparent(im: Image.Image, pad_ratio: float = 0.04) -> Image.Image:
+def autocrop_transparent(im: Image.Image, pad_ratio: float = 0.0) -> Image.Image:
     """Crop fully-transparent margins so the logo's actual content is
     tightly framed before we resize it. If the source has no useful
     transparency (e.g. a flat, fully-opaque rectangular PNG/GIF),
@@ -233,11 +239,109 @@ def linear_gradient(
 # Card rendering
 # ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
+# Layout: content box + fit mode + alignment
+# ----------------------------------------------------------------------
+
+ALIGN_FACTORS = {
+    "center": (0.5, 0.5),
+    "top": (0.5, 0.0),
+    "bottom": (0.5, 1.0),
+    "left": (0.0, 0.5),
+    "right": (1.0, 0.5),
+    "top-left": (0.0, 0.0),
+    "top-right": (1.0, 0.0),
+    "bottom-left": (0.0, 1.0),
+    "bottom-right": (1.0, 1.0),
+}
+
+FIT_MODES = ("contain", "cover", "width", "height")
+
+
+def parse_padding(s: str) -> tuple:
+    """CSS shorthand -> (top, right, bottom, left).
+
+    "10" | "10 20" | "10 20 30" | "10 20 30 40" (commas also accepted).
+    """
+    vals = [int(round(float(v))) for v in s.replace(",", " ").split() if v]
+    if len(vals) == 1:
+        t = r = b = l = vals[0]
+    elif len(vals) == 2:
+        t = b = vals[0]
+        r = l = vals[1]
+    elif len(vals) == 3:
+        t, r, b = vals
+        l = r
+    elif len(vals) == 4:
+        t, r, b, l = vals
+    else:
+        raise ValueError(f"--padding expects 1-4 values, got {len(vals)}: {s!r}")
+    return t, r, b, l
+
+
+def fit_logo(
+    logo: Image.Image,
+    width: int,
+    height: int,
+    padding: tuple = (0, 0, 0, 0),
+    fit: str = "contain",
+    align: str = "center",
+    max_px: int = None,
+    nudge_y: int = 0,
+) -> tuple:
+    """Scale and place `logo` inside the canvas content box.
+
+    Returns (resized_logo, x, y) so callers can keep shadows/glow in sync.
+    """
+    if fit not in FIT_MODES:
+        raise ValueError(f"unknown fit mode: {fit!r}")
+    if align not in ALIGN_FACTORS:
+        raise ValueError(f"unknown align: {align!r}")
+
+    pt, pr, pb, pl = padding
+    box_w = max(1, width - pl - pr)
+    box_h = max(1, height - pt - pb)
+    lw, lh = logo.size
+
+    if fit == "contain":
+        scale = min(box_w / lw, box_h / lh)
+    elif fit == "cover":
+        scale = max(box_w / lw, box_h / lh)
+    elif fit == "width":
+        scale = box_w / lw
+    else:  # height
+        scale = box_h / lh
+
+    if max_px:
+        scale = min(scale, max_px / max(lw, lh))
+
+    new_w = max(1, int(round(lw * scale)))
+    new_h = max(1, int(round(lh * scale)))
+    out = logo.resize((new_w, new_h), Image.LANCZOS)
+
+    ax, ay = ALIGN_FACTORS[align]
+    x = pl + int(round((box_w - new_w) * ax))
+    y = pt + int(round((box_h - new_h) * ay)) + nudge_y
+
+    if fit == "cover":
+        # Trim the overflow so a covering logo never spills past the content box.
+        left = max(0, pl - x)
+        top = max(0, pt - y)
+        out = out.crop((left, top, min(new_w, left + box_w), min(new_h, top + box_h)))
+        x, y = pl, pt + nudge_y
+
+    return out, x, y
+
+
 def make_card(
     logo: Image.Image,
     width: int = 1200,
     height: int = 630,
-    icon_max: int = 300,
+    padding: tuple = (0, 0, 0, 0),
+    fit: str = "contain",
+    align: str = "center",
+    max_px: int = None,
+    nudge_y: int = 0,
     bg_top: tuple = (13, 17, 23),
     bg_bottom: tuple = (9, 11, 15),
     gradient_angle: float = 180.0,
@@ -248,7 +352,9 @@ def make_card(
     draw_vignette: bool = True,
 ) -> Image.Image:
     W, H = width, height
-    cx, cy = W // 2, H // 2 - int(H * 0.032)
+    logo_hq, ix, iy = fit_logo(logo, W, H, padding, fit, align, max_px, nudge_y)
+    new_w, new_h = logo_hq.size
+    cx, cy = ix + new_w // 2, iy + new_h // 2
 
     # base gradient — angled per CSS linear-gradient() convention
     base = linear_gradient(
@@ -294,42 +400,32 @@ def make_card(
         black_layer = Image.new("RGBA", (W, H), (0, 0, 0, 255))
         base = Image.composite(black_layer, base, vignette.point(lambda p: int(p * 0.35)))
 
-    # fit logo (preserving aspect ratio, works for rectangular logos too)
-    lw, lh = logo.size
-    scale = icon_max / max(lw, lh)
-    new_w, new_h = max(1, int(lw * scale)), max(1, int(lh * scale))
-    logo_hq = logo.resize((new_w, new_h), Image.LANCZOS)
-
     # drop shadow
     shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    alpha_ch = logo_hq.split()[-1]
     shadow_black = Image.new("RGBA", (new_w, new_h), (0, 0, 0, 180))
-    shadow_black.putalpha(alpha_ch.point(lambda p: int(p * 0.5)))
-    sx = cx - new_w // 2
-    sy = cy - new_h // 2 + int(H * 0.022)
-    shadow.paste(shadow_black, (sx, sy), shadow_black)
+    shadow_black.putalpha(logo_hq.split()[-1].point(lambda p: int(p * 0.5)))
+    shadow.paste(shadow_black, (ix, iy + int(H * 0.022)), shadow_black)
     shadow = shadow.filter(ImageFilter.GaussianBlur(int(H * 0.032)))
     base = Image.alpha_composite(base, shadow)
 
-    ix = cx - new_w // 2
-    iy = cy - new_h // 2
     base.paste(logo_hq, (ix, iy), logo_hq)
 
     return base.convert("RGB")
 
 
 def make_transparent_image(
-    logo: Image.Image, width: int, height: int, icon_max: int,
+    logo: Image.Image,
+    width: int,
+    height: int,
+    padding: tuple = (0, 0, 0, 0),
+    fit: str = "contain",
+    align: str = "center",
+    max_px: int = None,
 ) -> Image.Image:
-    """Center a proportionally scaled logo on a transparent canvas."""
-    lw, lh = logo.size
-    scale = icon_max / max(lw, lh)
-    new_w, new_h = max(1, int(lw * scale)), max(1, int(lh * scale))
-    logo_hq = logo.resize((new_w, new_h), Image.LANCZOS)
+    """Place a proportionally scaled logo on a transparent canvas."""
+    logo_hq, x, y = fit_logo(logo, width, height, padding, fit, align, max_px)
 
     output = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    x = (width - new_w) // 2
-    y = (height - new_h) // 2
     output.paste(logo_hq, (x, y), logo_hq)
     return output
 
@@ -356,7 +452,28 @@ def main():
         help="Compression quality for jpeg/webp, 1-100 (default: 85). Ignored for png.",
     )
     p.add_argument("--size", default="1200x630", help="Canvas size, e.g. 1200x630 (default)")
-    p.add_argument("--icon-size", type=int, default=300, help="Max logo dimension in px (default: 300)")
+    p.add_argument(
+        "--icon-size", type=int, default=None,
+        help="Cap the logo's longest side, in px (default: 300 unless --padding/--fit is used)",
+    )
+    p.add_argument(
+        "--padding", default=None,
+        help=(
+            "Inset from the canvas edges, CSS shorthand: '10', '10 20', "
+            "'10 20 30' or '10 20 30 40' (top right bottom left). Defines the content box."
+        ),
+    )
+    p.add_argument(
+        "--fit", choices=list(FIT_MODES), default=None,
+        help=(
+            "How the logo fills the content box: contain (default, never overflows), "
+            "height (fill full height), width (fill full width), cover (fill both, cropped)"
+        ),
+    )
+    p.add_argument(
+        "--align", choices=sorted(ALIGN_FACTORS), default="center",
+        help="Where the logo sits inside the content box (default: center)",
+    )
     p.add_argument("--bg-top", default="0d1117", help="Top gradient color, hex (default: 0d1117)")
     p.add_argument("--bg-bottom", default="090b0f", help="Bottom gradient color, hex (default: 090b0f)")
     p.add_argument(
@@ -383,7 +500,11 @@ def main():
         "--transparent", action="store_true",
         help="Output the processed logo on a transparent canvas instead of a card (PNG/WebP only)",
     )
-    p.add_argument("--svg-render-px", type=int, default=1000, help="Rasterization size for SVG input (default: 1000)")
+    p.add_argument(
+        "--svg-render-px", type=int, default=1000,
+        help=("Minimum rasterization size for SVG input, longest side (default: 1000). "
+              "Automatically raised to 2x the target draw size when that is larger."),
+    )
     p.add_argument(
         "--remove-bg", action="store_true",
         help="Auto-remove a flat/near-uniform background (sampled from the image corners) before compositing",
@@ -407,21 +528,40 @@ def main():
     out_path = args.output or (os.path.splitext(args.input)[0] + f"-og.{fmt}")
     W, H = parse_size(args.size)
 
-    logo = load_source_image(args.input, svg_render_px=args.svg_render_px)
+    explicit_layout = args.padding is not None or args.fit is not None
+    try:
+        padding = parse_padding(args.padding) if args.padding else (0, 0, 0, 0)
+    except ValueError as e:
+        p.error(str(e))
+    fit = args.fit or "contain"
+    max_px = args.icon_size if (args.icon_size is not None or explicit_layout) else 300
+    # The card's logo sits slightly above centre for optical balance; an explicit
+    # padding/fit request means the user wants exact numbers, so drop the nudge.
+    nudge_y = 0 if explicit_layout else -int(H * 0.032)
+
+    box_w = max(1, W - padding[3] - padding[1])
+    box_h = max(1, H - padding[0] - padding[2])
+    svg_px = min(4096, max(args.svg_render_px, 2 * max(box_w, box_h, max_px or 0)))
+
+    logo = load_source_image(args.input, svg_render_px=svg_px)
     if args.remove_bg:
         logo = remove_background(logo, tolerance=args.bg_tolerance, feather=args.bg_feather)
     if not args.no_autocrop:
         logo = autocrop_transparent(logo)
 
     if args.transparent:
-        card = make_transparent_image(logo, W, H, args.icon_size)
+        card = make_transparent_image(logo, W, H, padding, fit, args.align, max_px)
     else:
         glow_rgb = hex_to_rgb(args.glow) if args.glow else None
         card = make_card(
             logo,
             width=W,
             height=H,
-            icon_max=args.icon_size,
+            padding=padding,
+            fit=fit,
+            align=args.align,
+            max_px=max_px,
+            nudge_y=nudge_y,
             bg_top=hex_to_rgb(args.bg_top),
             bg_bottom=hex_to_rgb(args.bg_bottom),
             gradient_angle=args.gradient_angle,
