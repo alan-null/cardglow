@@ -112,20 +112,57 @@ def remove_background(
     region transparent (so similarly colored patches inside the subject
     itself are left untouched). `feather` softens the cut edge."""
     rgba = np.array(im.convert("RGBA"))
-    rgb = rgba[..., :3].astype(np.int16)
+    full_h, full_w = rgba.shape[:2]
+    alpha_full = rgba[..., 3]
+
+    # Scope everything to the bounding box of non-transparent content.
+    # A source may already carry a transparent margin of its own (a
+    # rounded-corner cutout, prior processing, etc.) without actually
+    # having had its real background removed yet; sampling/flooding from
+    # the literal image border would either see nothing but that margin
+    # (falsely concluding there's no background left) or leak through its
+    # anti-aliased edge. Working within the content's own bbox sidesteps
+    # both: an already-fully-cut-out subject's bbox hugs its silhouette
+    # (nothing flat left to flood-fill), while a subject with a thin
+    # transparent margin around a still-flat background exposes that
+    # background at the bbox's own edge, where it can be found normally.
+    bbox = Image.fromarray(alpha_full, mode="L").getbbox()
+    if not bbox:
+        return im
+    x0, y0, x1, y1 = bbox
+    rgb = rgba[y0:y1, x0:x1, :3].astype(np.int16)
+    alpha_ch = alpha_full[y0:y1, x0:x1]
     h, w = rgb.shape[:2]
 
     cs = max(1, min(corner_sample, h, w))
-    corners = np.concatenate([
-        rgb[0:cs, 0:cs].reshape(-1, 3),
-        rgb[0:cs, w - cs:w].reshape(-1, 3),
-        rgb[h - cs:h, 0:cs].reshape(-1, 3),
-        rgb[h - cs:h, w - cs:w].reshape(-1, 3),
-    ], axis=0)
-    bg_color = corners.mean(axis=0)
+    corner_regions = [
+        (rgb[0:cs, 0:cs], alpha_ch[0:cs, 0:cs]),
+        (rgb[0:cs, w - cs:w], alpha_ch[0:cs, w - cs:w]),
+        (rgb[h - cs:h, 0:cs], alpha_ch[h - cs:h, 0:cs]),
+        (rgb[h - cs:h, w - cs:w], alpha_ch[h - cs:h, w - cs:w]),
+    ]
+    # Only trust opaque pixels for the background color estimate - a
+    # transparent pixel's leftover RGB is meaningless (some tools leave
+    # white behind, others black) and would otherwise get sampled as if
+    # it were a real background color.
+    opaque_corners = [
+        region.reshape(-1, 3)[a.reshape(-1) >= 250]
+        for region, a in corner_regions
+    ]
+    opaque_corners = [c for c in opaque_corners if len(c) > 0]
+    if not opaque_corners:
+        # None of the corners have any solid pixels left to sample - the
+        # source is already a tight cutout with nothing but soft/
+        # transparent edges at its corners, so there's no reliable flat
+        # background left to remove.
+        return im
+    bg_color = np.concatenate(opaque_corners, axis=0).mean(axis=0)
 
     dist = np.sqrt(((rgb - bg_color) ** 2).sum(axis=-1))
-    candidate = dist <= tolerance
+    # Exclude already-partially-transparent pixels from the candidate
+    # set too: their RGB is unreliable and they're already a cut edge,
+    # not remaining flat background to flood-fill through.
+    candidate = (dist <= tolerance) & (alpha_ch >= 250)
 
     # flood-fill candidate background pixels reachable from the border,
     # done on a mask image so PIL's fast C flood fill does the work.
@@ -151,8 +188,10 @@ def remove_background(
     else:
         bg_frac = bg_mask.astype(np.float32)
 
-    alpha = rgba[..., 3].astype(np.float32) * (1.0 - bg_frac)
-    rgba[..., 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    sub_alpha = alpha_ch.astype(np.float32) * (1.0 - bg_frac)
+    out_alpha = alpha_full.astype(np.float32)
+    out_alpha[y0:y1, x0:x1] = np.clip(sub_alpha, 0, 255)
+    rgba[..., 3] = out_alpha.astype(np.uint8)
     return Image.fromarray(rgba, mode="RGBA")
 
 
