@@ -33,6 +33,7 @@ logo's dominant color and tints the background glow to match.
 - **Precise layout control** — CSS-style `--padding`, `--fit` (contain / cover / width / height) and `--align`, so you can say "fill the full height, 10px from the top and bottom" and get exactly that.
 - **Auto background removal** — optionally strip a flat/near-uniform background (e.g. a product photo on white) before compositing, so it doesn't clash with the card's own background.
 - **Auto color-matched glow** — samples the logo's dominant color, no manual hex-picking needed (or override with `--glow`).
+- **Watermark & provenance metadata** — stamp a corner or full-page tiled text watermark, and embed author / copyright / custom fields in the file itself.
 - **Angled gradient background** — CSS `linear-gradient()`-style `--gradient-angle`, dithered to avoid banding on narrow color ranges.
 - **Subtle dot grid, vignette, drop shadow** — the same details that make GitHub's own OG cards feel polished.
 - **No local installs** — ships as a Docker image; only dependency on your machine is Docker itself.
@@ -94,7 +95,53 @@ cardglow <input> [options]
                           (default: 30). Higher removes more shades/noise.
   --bg-feather FLOAT      Edge feather radius in px for --remove-bg
                           (default: 2.0, 0 disables softening)
+  --watermark TEXT        Draw TEXT as a semi-transparent watermark
+  --watermark-position P  Where it sits: center, top, bottom, left, right,
+                          top-left, top-right, bottom-left,
+                          bottom-right (default)
+  --watermark-opacity F   Opacity 0-1 (default: 0.35)
+  --watermark-size PX     Font size (default: ~2.8% of canvas height)
+  --watermark-color HEX   Text color (default: ffffff)
+  --watermark-margin PX   Inset from the edges (default: ~2.5% of height)
+  --watermark-tile        Repeat the watermark diagonally across the image
+  --watermark-angle DEG   Rotation of the tiled watermark (default: 30)
+  --author NAME           Embed an author/creator name in the metadata
+  --copyright TEXT        Embed a copyright notice in the metadata
+  --description TEXT      Embed a description in the metadata
+  --metadata KEY=VALUE    Embed an extra metadata field (repeatable)
+  --no-metadata           Write no metadata at all
 ```
+
+### Protecting your assets
+
+cardglow can mark an image two ways — visibly and invisibly — and they are
+meant to be used together:
+
+```bash
+# Discreet corner credit
+./cardglow-docker.sh logo.png --watermark "example.com"
+
+# Hard-to-crop tiled watermark for previews/proofs
+./cardglow-docker.sh logo.png --watermark "ACME — PREVIEW" --watermark-tile --watermark-opacity 0.10
+
+# Ownership info embedded in the file
+./cardglow-docker.sh logo.png --author "ACME Ltd" --copyright "(c) 2026 ACME" --metadata "License=CC-BY-4.0"
+```
+
+How the metadata is stored per format:
+
+| Format      | Storage       | Fields                                                                                               |
+| ----------- | ------------- | ---------------------------------------------------------------------------------------------------- |
+| PNG         | `tEXt` chunks | one chunk per key (`Software`, `Author`, `Copyright`, `Description`, plus your own)                  |
+| JPEG / WebP | EXIF          | `Software`, `Artist`, `Copyright`; anything else is folded into `ImageDescription` as `Key=Value; …` |
+
+Every output carries `Software=cardglow` by default; pass `--no-metadata` to
+strip that too.
+
+> **Caveat:** metadata is *attribution*, not protection — most social platforms
+> re-encode uploads and drop EXIF/`tEXt` chunks, and anyone can strip it with
+> one command. A visible watermark (ideally `--watermark-tile`) is the only
+> part that survives a re-upload or a screenshot.
 
 ### Sizing and positioning
 
@@ -154,6 +201,12 @@ Note that `--fit height` may overflow horizontally on wide logos — use
 
 # Remove a flat background and create a transparent 600x600 WebP cutout
 ./cardglow-docker.sh photo.png --remove-bg --transparent --size 600x600 --icon-size 600 -o cutout.webp
+
+# Corner watermark plus embedded ownership info
+./cardglow-docker.sh logo.png --watermark "example.com" --author "ACME Ltd" --copyright "(c) 2026 ACME"
+
+# Faint tiled watermark across the whole card
+./cardglow-docker.sh logo.png --watermark "ACME — PREVIEW" --watermark-tile --watermark-opacity 0.10
 ```
 
 ## Notes on SVG input

@@ -30,6 +30,9 @@ Usage:
     cardglow logo.png --format webp             # compressed WebP output
     cardglow photo.png --remove-bg              # auto-remove flat background
     cardglow photo.png --remove-bg --transparent --size 600x600 -o cutout.webp
+    cardglow logo.png --watermark "example.com"  # visible corner watermark
+    cardglow logo.png --watermark "(c) ACME" --watermark-tile
+    cardglow logo.png --copyright "(c) 2026 ACME" --author "ACME Ltd"
 
 Requirements:
     pip install pillow cairosvg numpy
@@ -42,7 +45,7 @@ import os
 import sys
 import math
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, PngImagePlugin
 
 
 # ----------------------------------------------------------------------
@@ -470,6 +473,140 @@ def make_transparent_image(
 
 
 # ----------------------------------------------------------------------
+# Watermarking / provenance metadata
+# ----------------------------------------------------------------------
+
+_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
+
+
+def load_font(size: int):
+    for path in _FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size)  # scalable default, Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def draw_watermark(
+    im: Image.Image,
+    text: str,
+    position: str = "bottom-right",
+    opacity: float = 0.35,
+    font_px: int = None,
+    color: tuple = (255, 255, 255),
+    margin: int = None,
+    tile: bool = False,
+    angle: float = 30.0,
+) -> Image.Image:
+    """Composite a semi-transparent text watermark onto the image.
+
+    `tile=True` repeats the text diagonally across the whole canvas, which is
+    far harder to crop out than a single corner mark.
+    """
+    W, H = im.size
+    size = font_px or max(11, int(round(H * 0.028)))
+    alpha = int(round(max(0.0, min(1.0, opacity)) * 255))
+    if alpha == 0 or not text:
+        return im
+
+    font = load_font(size)
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    if tile:
+        probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        l, t, r, b = probe.textbbox((0, 0), text, font=font)
+        tw, th = r - l, b - t
+        gap_x, gap_y = int(tw * 0.6) + size, int(th * 2.5) + size
+        stamp = Image.new("RGBA", (tw + 2 * size, th + 2 * size), (0, 0, 0, 0))
+        ImageDraw.Draw(stamp).text((size - l, size - t), text, font=font, fill=(*color, alpha))
+        stamp = stamp.rotate(angle, resample=Image.BICUBIC, expand=True)
+        sw, sh = stamp.size
+        step_x, step_y = sw + gap_x, sh + gap_y
+        for row, y in enumerate(range(-sh, H + step_y, step_y)):
+            offset = (row % 2) * step_x // 2
+            for x in range(-sw + offset, W + step_x, step_x):
+                overlay.alpha_composite(stamp, (x, y))
+    else:
+        if position not in ALIGN_FACTORS:
+            raise ValueError(f"unknown watermark position: {position!r}")
+        pad = margin if margin is not None else max(8, int(round(H * 0.025)))
+        d = ImageDraw.Draw(overlay)
+        l, t, r, b = d.textbbox((0, 0), text, font=font)
+        tw, th = r - l, b - t
+        ax, ay = ALIGN_FACTORS[position]
+        x = pad + int(round((W - 2 * pad - tw) * ax)) - l
+        y = pad + int(round((H - 2 * pad - th) * ay)) - t
+        # Faint shadow keeps light text legible over light backgrounds.
+        d.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, alpha // 2))
+        d.text((x, y), text, font=font, fill=(*color, alpha))
+
+    out = Image.alpha_composite(im.convert("RGBA"), overlay)
+    return out if im.mode == "RGBA" else out.convert(im.mode)
+
+
+def parse_metadata_pairs(pairs) -> dict:
+    """['Key=Value', ...] -> {'Key': 'Value', ...}"""
+    out = {}
+    for item in pairs or []:
+        if "=" not in item:
+            raise ValueError(f"--metadata expects KEY=VALUE, got {item!r}")
+        k, v = item.split("=", 1)
+        k = k.strip()
+        if not k:
+            raise ValueError(f"--metadata key must not be empty: {item!r}")
+        out[k] = v.strip()
+    return out
+
+
+# EXIF tag ids used for JPEG/WebP provenance.
+_EXIF_IMAGE_DESCRIPTION = 0x010E
+_EXIF_SOFTWARE = 0x0131
+_EXIF_ARTIST = 0x013B
+_EXIF_COPYRIGHT = 0x8298
+
+
+def metadata_save_kwargs(fmt: str, meta: dict) -> dict:
+    """Turn a flat key/value map into format-specific Image.save() kwargs.
+
+    PNG gets one tEXt chunk per key; JPEG/WebP get standard EXIF fields, with
+    any extra keys folded into ImageDescription as `Key=Value; ...`.
+    """
+    meta = {k: v for k, v in meta.items() if v}
+    if not meta:
+        return {}
+
+    if fmt == "png":
+        info = PngImagePlugin.PngInfo()
+        for k, v in meta.items():
+            info.add_text(k, v)
+        return {"pnginfo": info}
+
+    exif = Image.Exif()
+    rest = dict(meta)
+    for key, tag in (("Software", _EXIF_SOFTWARE), ("Author", _EXIF_ARTIST),
+                     ("Copyright", _EXIF_COPYRIGHT)):
+        if key in rest:
+            exif[tag] = rest.pop(key)
+    description = rest.pop("Description", None)
+    extras = "; ".join(f"{k}={v}" for k, v in rest.items())
+    joined = "; ".join(x for x in (description, extras) if x)
+    if joined:
+        exif[_EXIF_IMAGE_DESCRIPTION] = joined
+    return {"exif": exif.tobytes()}
+
+
+# ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
 
@@ -556,6 +693,43 @@ def main():
         "--bg-feather", type=float, default=2.0,
         help="Edge feather radius in px for --remove-bg (default: 2.0, 0 disables softening)",
     )
+    p.add_argument("--watermark", default=None, help="Draw this text as a semi-transparent watermark")
+    p.add_argument(
+        "--watermark-position", choices=sorted(ALIGN_FACTORS), default="bottom-right",
+        help="Where the watermark sits (default: bottom-right). Ignored with --watermark-tile",
+    )
+    p.add_argument(
+        "--watermark-opacity", type=float, default=0.35,
+        help="Watermark opacity, 0-1 (default: 0.35; try 0.08 with --watermark-tile)",
+    )
+    p.add_argument(
+        "--watermark-size", type=int, default=None,
+        help="Watermark font size in px (default: ~2.8%% of the canvas height)",
+    )
+    p.add_argument("--watermark-color", default="ffffff", help="Watermark text color, hex (default: ffffff)")
+    p.add_argument(
+        "--watermark-margin", type=int, default=None,
+        help="Watermark inset from the canvas edges in px (default: ~2.5%% of the height)",
+    )
+    p.add_argument(
+        "--watermark-tile", action="store_true",
+        help="Repeat the watermark diagonally across the whole image instead of one corner",
+    )
+    p.add_argument(
+        "--watermark-angle", type=float, default=30.0,
+        help="Rotation of the tiled watermark in degrees (default: 30)",
+    )
+    p.add_argument("--author", default=None, help="Embed an author/creator name in the output metadata")
+    p.add_argument("--copyright", dest="copyright_", metavar="TEXT", default=None, help="Embed a copyright notice in the output metadata")
+    p.add_argument("--description", default=None, help="Embed a description in the output metadata")
+    p.add_argument(
+        "--metadata", action="append", metavar="KEY=VALUE", default=None,
+        help="Embed an extra metadata field (repeatable)",
+    )
+    p.add_argument(
+        "--no-metadata", action="store_true",
+        help="Write the image with no metadata at all (not even the default Software tag)",
+    )
     args = p.parse_args()
 
     fmt = args.format or (os.path.splitext(args.output)[1].lstrip(".").lower() if args.output else "png")
@@ -610,6 +784,20 @@ def main():
             draw_grid=not args.no_grid,
             draw_vignette=not args.no_vignette,
         )
+
+    if args.watermark:
+        card = draw_watermark(
+            card,
+            args.watermark,
+            position=args.watermark_position,
+            opacity=args.watermark_opacity,
+            font_px=args.watermark_size,
+            color=hex_to_rgb(args.watermark_color),
+            margin=args.watermark_margin,
+            tile=args.watermark_tile,
+            angle=args.watermark_angle,
+        )
+
     save_kwargs = {}
     if fmt == "jpeg":
         save_kwargs = {"quality": args.quality, "optimize": True, "progressive": True}
@@ -617,6 +805,21 @@ def main():
         save_kwargs = {"quality": args.quality}
     elif fmt == "png":
         save_kwargs = {"optimize": True}
+
+    if not args.no_metadata:
+        try:
+            extra = parse_metadata_pairs(args.metadata)
+        except ValueError as e:
+            p.error(str(e))
+        meta = {
+            "Software": "cardglow",
+            "Author": args.author,
+            "Copyright": args.copyright_,
+            "Description": args.description,
+        }
+        meta.update(extra)
+        save_kwargs.update(metadata_save_kwargs(fmt, meta))
+
     card.save(out_path, format=fmt.upper(), **save_kwargs)
     size_kb = os.path.getsize(out_path) / 1024
     print(f"Saved {out_path}  ({W}x{H}, {fmt}, {size_kb:.0f} KB)")
