@@ -1,8 +1,18 @@
-# cardglow
+<p align="center">
+  <img src="docs/logo.svg" width="120" alt="cardglow logo" />
+</p>
 
-Turn any logo — PNG, GIF, or SVG, square or rectangular — into a clean,
-[GitHub-OG-card](https://opengraph.githubassets.com)-style social preview
-image.
+<h1 align="center">cardglow</h1>
+
+<p align="center">
+  Turn any logo — PNG, GIF, or SVG, square or rectangular — into a clean,
+  <a href="https://opengraph.githubassets.com">GitHub-OG-card</a>-style social preview image.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/alan-null/cardglow" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/ghcr.io-alan--null%2Fcardglow-2f8fff?logo=docker&logoColor=white" alt="Container image" />
+</p>
 
 Point it at a logo and get back a ready-to-use `og:image` / Twitter
 card PNG, with **zero manual color picking**: cardglow auto-detects the

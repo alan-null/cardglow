@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="cardglow logo v2j">
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20262f"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.18" cy="0.2" r="0.85">
+      <stop offset="0" stop-color="#2ee6a8" stop-opacity="0.9"/>
+      <stop offset="0.4" stop-color="#2f8fff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#2f8fff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="20" y="38" width="216" height="180" rx="26" fill="url(#card)"/>
+  <rect x="20" y="38" width="216" height="180" rx="26" fill="url(#glow)"/>
+  <rect x="20" y="38" width="216" height="180" rx="26" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+  <circle cx="60" cy="76" r="16" fill="#ffffff"/>
+  <circle cx="60" cy="76" r="16" fill="#d8ffe9" opacity="0.9"/>
+</svg>
