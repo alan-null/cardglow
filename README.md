@@ -244,6 +244,16 @@ docker build -t cardglow .
 docker run --rm -v "$PWD":/data cardglow logo.png
 ```
 
+### Running tests
+
+The test suite runs inside the Docker image, so no host Python environment is
+required:
+
+```bash
+docker build --target test -t cardglow:test .
+docker run --rm -v "$PWD":/workspace -w /workspace --entrypoint pytest cardglow:test -q -p no:cacheprovider
+```
+
 ## Running without Docker
 
 If you'd rather run it directly:

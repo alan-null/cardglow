@@ -8,7 +8,37 @@ on:
     branches: [ "master", "main" ]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build --target test --tag cardglow:test .
+
+      - name: Run test suite
+        run: >-
+          docker run --rm
+          --volume "$PWD":/workspace
+          --workdir /workspace
+          --entrypoint pytest
+          cardglow:test
+          -q -p no:cacheprovider
+
+      - name: Run Docker wrapper smoke test
+        run: |
+          mkdir -p temp
+          CARDGLOW_IMAGE=cardglow:test ./cardglow-docker.sh \
+            docs/input.svg --size 64x32 --no-grid --no-vignette \
+            -o temp/ci-wrapper-smoke.png
+          test -s temp/ci-wrapper-smoke.png
+          test "$(stat -c '%u:%g' temp/ci-wrapper-smoke.png)" = "$(id -u):$(id -g)"
+          rm -f temp/ci-wrapper-smoke.png
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
