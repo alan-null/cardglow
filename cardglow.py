@@ -41,11 +41,17 @@ Requirements:
 
 import argparse
 import io
+import json
 import os
 import sys
 import math
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, PngImagePlugin
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    tomllib = None
 
 
 # ----------------------------------------------------------------------
@@ -610,6 +616,231 @@ def metadata_save_kwargs(fmt: str, meta: dict) -> dict:
 # CLI
 # ----------------------------------------------------------------------
 
+DEFAULT_OPTIONS = {
+    "format": None,
+    "output": None,
+    "quality": 85,
+    "size": "1200x630",
+    "icon_size": None,
+    "padding": None,
+    "fit": None,
+    "align": "center",
+    "bg_top": "0d1117",
+    "bg_bottom": "090b0f",
+    "gradient_angle": 180.0,
+    "no_dither": False,
+    "dither_strength": 1.0,
+    "glow": None,
+    "no_grid": False,
+    "no_vignette": False,
+    "no_autocrop": False,
+    "transparent": False,
+    "svg_render_px": 1000,
+    "remove_bg": False,
+    "bg_tolerance": 30.0,
+    "bg_feather": 2.0,
+    "watermark": None,
+    "watermark_position": "bottom-right",
+    "watermark_opacity": 0.35,
+    "watermark_size": None,
+    "watermark_color": "ffffff",
+    "watermark_margin": None,
+    "watermark_tile": False,
+    "watermark_angle": 30.0,
+    "author": None,
+    "copyright_": None,
+    "description": None,
+    "metadata": None,
+    "no_metadata": False,
+}
+
+BUILTIN_THEMES = {
+    "midnight": {},
+    "paper": {
+        "bg_top": "f5f7fb",
+        "bg_bottom": "d8dee9",
+        "glow": "5b6b85",
+    },
+    "neon": {
+        "bg_top": "160d24",
+        "bg_bottom": "05070f",
+        "gradient_angle": 135,
+        "glow": "ff3b81",
+    },
+    "mono": {
+        "bg_top": "292929",
+        "bg_bottom": "0d0d0d",
+        "glow": "bdbdbd",
+        "no_grid": True,
+    },
+}
+
+
+def _config_key(key: str) -> str:
+    key = key.replace("-", "_")
+    return "copyright_" if key == "copyright" else key
+
+
+def _config_options(values, source: str) -> dict:
+    if not isinstance(values, dict):
+        raise ValueError(f"{source} must be an object/table")
+
+    options = {}
+    for key, value in values.items():
+        normalized = _config_key(key)
+        if normalized not in DEFAULT_OPTIONS:
+            raise ValueError(f"unknown option {key!r} in {source}")
+        options[normalized] = value
+    return options
+
+
+def load_config(path: str) -> dict:
+    """Load a JSON or TOML config file into a validated mapping."""
+    try:
+        with open(path, "rb") as config_file:
+            if path.lower().endswith(".json"):
+                data = json.load(config_file)
+            elif path.lower().endswith((".toml", ".tml")):
+                if tomllib is None:
+                    raise ValueError("TOML config files require Python 3.11 or newer")
+                data = tomllib.load(config_file)
+            else:
+                raise ValueError("config file must use .json, .toml, or .tml extension")
+    except OSError as exc:
+        raise ValueError(f"could not read config file {path!r}: {exc}") from exc
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError if tomllib else ValueError) as exc:
+        raise ValueError(f"could not parse config file {path!r}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("config file must contain an object/table")
+    return data
+
+
+def resolve_config(path: str = None, theme_name: str = None) -> tuple:
+    """Return merged options and selected theme name.
+
+    Precedence within this function is built-in defaults, selected theme,
+    then config options. Explicit CLI options are applied by `main()`.
+    """
+    data = load_config(path) if path else {}
+    themes = data.get("themes", {})
+    if not isinstance(themes, dict):
+        raise ValueError("config key 'themes' must be an object/table")
+
+    selected = theme_name or data.get("theme")
+    if selected is not None and not isinstance(selected, str):
+        raise ValueError("theme name must be a string")
+
+    options = dict(DEFAULT_OPTIONS)
+    if selected:
+        if selected in BUILTIN_THEMES:
+            options.update(BUILTIN_THEMES[selected])
+        elif selected in themes:
+            options.update(_config_options(themes[selected], f"theme {selected!r}"))
+        else:
+            raise ValueError(f"unknown theme {selected!r}")
+
+    direct_options = {
+        key: value for key, value in data.items()
+        if key not in {"theme", "themes", "options"}
+    }
+    options.update(_config_options(direct_options, "config file"))
+    if "options" in data:
+        options.update(_config_options(data["options"], "config key 'options'"))
+    return options, selected
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="cardglow", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        argument_default=argparse.SUPPRESS,
+    )
+    p.add_argument("input", help="Path to source logo (.png, .gif, or .svg)")
+    p.add_argument("--config", help="JSON or TOML config file")
+    p.add_argument("--theme", help="Built-in or config-defined theme name")
+    p.add_argument("-o", "--output", help="Output path (default: <input>-og.<format>)")
+    p.add_argument(
+        "--format", choices=["png", "jpeg", "jpg", "webp"],
+        help="Output image format (default: inferred from -o extension, else png)",
+    )
+    p.add_argument(
+        "--quality", type=int,
+        help="Compression quality for jpeg/webp, 1-100 (default: 85). Ignored for png.",
+    )
+    p.add_argument("--size", help="Canvas size, e.g. 1200x630 (default)")
+    p.add_argument(
+        "--icon-size", type=int,
+        help="Cap the logo's longest side, in px (default: 300 unless --padding/--fit is used)",
+    )
+    p.add_argument(
+        "--padding",
+        help=(
+            "Inset from the canvas edges, CSS shorthand: '10', '10 20', "
+            "'10 20 30' or '10 20 30 40' (top right bottom left). Defines the content box."
+        ),
+    )
+    p.add_argument(
+        "--fit", choices=list(FIT_MODES),
+        help=(
+            "How the logo fills the content box: contain (default, never overflows), "
+            "height (fill full height), width (fill full width), cover (fill both, cropped)"
+        ),
+    )
+    p.add_argument(
+        "--align", choices=sorted(ALIGN_FACTORS),
+        help="Where the logo sits inside the content box (default: center)",
+    )
+    p.add_argument("--bg-top", help="Top gradient color, hex (default: 0d1117)")
+    p.add_argument("--bg-bottom", help="Bottom gradient color, hex (default: 090b0f)")
+    p.add_argument(
+        "--gradient-angle", type=float,
+        help=(
+            "Gradient direction in degrees, CSS linear-gradient() style: "
+            "0=to top, 90=to right, 180=to bottom (default, plain vertical), "
+            "270=to left. Try 135 for a GitHub-style bottom-left -> top-right diagonal."
+        ),
+    )
+    p.add_argument("--no-dither", dest="no_dither", action="store_true", help="Disable gradient dithering")
+    p.add_argument("--dither", dest="no_dither", action="store_false", help="Enable gradient dithering")
+    p.add_argument("--dither-strength", type=float, help="Dither noise amplitude (default: 1.0)")
+    p.add_argument("--glow", help="Force glow color, hex (default: auto-detected from logo)")
+    p.add_argument("--no-grid", dest="no_grid", action="store_true", help="Disable the dot-grid background")
+    p.add_argument("--grid", dest="no_grid", action="store_false", help="Enable the dot-grid background")
+    p.add_argument("--no-vignette", dest="no_vignette", action="store_true", help="Disable the corner vignette")
+    p.add_argument("--vignette", dest="no_vignette", action="store_false", help="Enable the corner vignette")
+    p.add_argument("--no-autocrop", dest="no_autocrop", action="store_true", help="Skip auto-cropping transparent margins")
+    p.add_argument("--autocrop", dest="no_autocrop", action="store_false", help="Enable auto-cropping transparent margins")
+    p.add_argument(
+        "--transparent", action="store_true",
+        help="Output the processed logo on a transparent canvas instead of a card (PNG/WebP only)",
+    )
+    p.add_argument("--opaque", dest="transparent", action="store_false", help="Output a card instead of a transparent canvas")
+    p.add_argument("--svg-render-px", type=int, help="Minimum SVG rasterization size, longest side (default: 1000)")
+    p.add_argument("--remove-bg", action="store_true", help="Auto-remove a flat/near-uniform background")
+    p.add_argument("--no-remove-bg", dest="remove_bg", action="store_false", help="Keep the source background")
+    p.add_argument("--bg-tolerance", type=float, help="Color-distance tolerance for --remove-bg (default: 30)")
+    p.add_argument("--bg-feather", type=float, help="Edge feather radius in px for --remove-bg (default: 2.0)")
+    p.add_argument("--watermark", help="Draw this text as a semi-transparent watermark")
+    p.add_argument(
+        "--watermark-position", choices=sorted(ALIGN_FACTORS),
+        help="Where the watermark sits (default: bottom-right). Ignored with --watermark-tile",
+    )
+    p.add_argument("--watermark-opacity", type=float, help="Watermark opacity, 0-1 (default: 0.35)")
+    p.add_argument("--watermark-size", type=int, help="Watermark font size in px")
+    p.add_argument("--watermark-color", help="Watermark text color, hex (default: ffffff)")
+    p.add_argument("--watermark-margin", type=int, help="Watermark inset from the canvas edges in px")
+    p.add_argument("--watermark-tile", action="store_true", help="Repeat the watermark diagonally across the whole image")
+    p.add_argument("--no-watermark-tile", dest="watermark_tile", action="store_false", help="Use one watermark instead of tiling")
+    p.add_argument("--watermark-angle", type=float, help="Rotation of the tiled watermark in degrees (default: 30)")
+    p.add_argument("--author", help="Embed an author/creator name in the output metadata")
+    p.add_argument("--copyright", dest="copyright_", metavar="TEXT", help="Embed a copyright notice in the output metadata")
+    p.add_argument("--description", help="Embed a description in the output metadata")
+    p.add_argument("--metadata", action="append", metavar="KEY=VALUE", help="Embed an extra metadata field (repeatable)")
+    p.add_argument("--no-metadata", action="store_true", help="Write no metadata at all")
+    p.add_argument("--metadata-enabled", dest="no_metadata", action="store_false", help="Write metadata")
+    return p
+
 def parse_size(s: str) -> tuple:
     parts = s.lower().split("x")
     if len(parts) != 2:
@@ -623,122 +854,22 @@ def parse_size(s: str) -> tuple:
     return w, h
 
 
-def main():
-    p = argparse.ArgumentParser(prog="cardglow", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("input", help="Path to source logo (.png, .gif, or .svg)")
-    p.add_argument("-o", "--output", default=None, help="Output path (default: <input>-og.<format>)")
-    p.add_argument(
-        "--format", choices=["png", "jpeg", "jpg", "webp"], default=None,
-        help="Output image format (default: inferred from -o extension, else png)",
-    )
-    p.add_argument(
-        "--quality", type=int, default=85,
-        help="Compression quality for jpeg/webp, 1-100 (default: 85). Ignored for png.",
-    )
-    p.add_argument("--size", default="1200x630", help="Canvas size, e.g. 1200x630 (default)")
-    p.add_argument(
-        "--icon-size", type=int, default=None,
-        help="Cap the logo's longest side, in px (default: 300 unless --padding/--fit is used)",
-    )
-    p.add_argument(
-        "--padding", default=None,
-        help=(
-            "Inset from the canvas edges, CSS shorthand: '10', '10 20', "
-            "'10 20 30' or '10 20 30 40' (top right bottom left). Defines the content box."
-        ),
-    )
-    p.add_argument(
-        "--fit", choices=list(FIT_MODES), default=None,
-        help=(
-            "How the logo fills the content box: contain (default, never overflows), "
-            "height (fill full height), width (fill full width), cover (fill both, cropped)"
-        ),
-    )
-    p.add_argument(
-        "--align", choices=sorted(ALIGN_FACTORS), default="center",
-        help="Where the logo sits inside the content box (default: center)",
-    )
-    p.add_argument("--bg-top", default="0d1117", help="Top gradient color, hex (default: 0d1117)")
-    p.add_argument("--bg-bottom", default="090b0f", help="Bottom gradient color, hex (default: 090b0f)")
-    p.add_argument(
-        "--gradient-angle", type=float, default=180.0,
-        help=(
-            "Gradient direction in degrees, CSS linear-gradient() style: "
-            "0=to top, 90=to right, 180=to bottom (default, plain vertical), "
-            "270=to left. Try 135 for a GitHub-style bottom-left -> top-right diagonal."
-        ),
-    )
-    p.add_argument(
-        "--no-dither", action="store_true",
-        help="Disable gradient dithering (may show visible banding on narrow-range gradients)",
-    )
-    p.add_argument(
-        "--dither-strength", type=float, default=1.0,
-        help="Dither noise amplitude, roughly in 8-bit levels (default: 1.0). Raise for very narrow-range gradients.",
-    )
-    p.add_argument("--glow", default=None, help="Force glow color, hex (default: auto-detected from logo)")
-    p.add_argument("--no-grid", action="store_true", help="Disable the dot-grid background")
-    p.add_argument("--no-vignette", action="store_true", help="Disable the corner vignette")
-    p.add_argument("--no-autocrop", action="store_true", help="Skip auto-cropping transparent margins")
-    p.add_argument(
-        "--transparent", action="store_true",
-        help="Output the processed logo on a transparent canvas instead of a card (PNG/WebP only)",
-    )
-    p.add_argument(
-        "--svg-render-px", type=int, default=1000,
-        help=("Minimum rasterization size for SVG input, longest side (default: 1000). "
-              "Automatically raised to 2x the target draw size when that is larger."),
-    )
-    p.add_argument(
-        "--remove-bg", action="store_true",
-        help="Auto-remove a flat/near-uniform background (sampled from the image corners) before compositing",
-    )
-    p.add_argument(
-        "--bg-tolerance", type=float, default=30.0,
-        help="Color-distance tolerance for --remove-bg (default: 30). Higher removes more shades/noise.",
-    )
-    p.add_argument(
-        "--bg-feather", type=float, default=2.0,
-        help="Edge feather radius in px for --remove-bg (default: 2.0, 0 disables softening)",
-    )
-    p.add_argument("--watermark", default=None, help="Draw this text as a semi-transparent watermark")
-    p.add_argument(
-        "--watermark-position", choices=sorted(ALIGN_FACTORS), default="bottom-right",
-        help="Where the watermark sits (default: bottom-right). Ignored with --watermark-tile",
-    )
-    p.add_argument(
-        "--watermark-opacity", type=float, default=0.35,
-        help="Watermark opacity, 0-1 (default: 0.35; try 0.08 with --watermark-tile)",
-    )
-    p.add_argument(
-        "--watermark-size", type=int, default=None,
-        help="Watermark font size in px (default: ~2.8%% of the canvas height)",
-    )
-    p.add_argument("--watermark-color", default="ffffff", help="Watermark text color, hex (default: ffffff)")
-    p.add_argument(
-        "--watermark-margin", type=int, default=None,
-        help="Watermark inset from the canvas edges in px (default: ~2.5%% of the height)",
-    )
-    p.add_argument(
-        "--watermark-tile", action="store_true",
-        help="Repeat the watermark diagonally across the whole image instead of one corner",
-    )
-    p.add_argument(
-        "--watermark-angle", type=float, default=30.0,
-        help="Rotation of the tiled watermark in degrees (default: 30)",
-    )
-    p.add_argument("--author", default=None, help="Embed an author/creator name in the output metadata")
-    p.add_argument("--copyright", dest="copyright_", metavar="TEXT", default=None, help="Embed a copyright notice in the output metadata")
-    p.add_argument("--description", default=None, help="Embed a description in the output metadata")
-    p.add_argument(
-        "--metadata", action="append", metavar="KEY=VALUE", default=None,
-        help="Embed an extra metadata field (repeatable)",
-    )
-    p.add_argument(
-        "--no-metadata", action="store_true",
-        help="Write the image with no metadata at all (not even the default Software tag)",
-    )
-    args = p.parse_args()
+def main(argv=None):
+    p = build_parser()
+    preliminary, _ = p.parse_known_args(argv)
+    cli_keys = set(vars(preliminary))
+    config_path = getattr(preliminary, "config", None)
+    cli_theme = getattr(preliminary, "theme", None)
+    try:
+        defaults, selected_theme = resolve_config(config_path, cli_theme)
+    except ValueError as exc:
+        p.error(str(exc))
+    defaults["config"] = config_path
+    defaults["theme"] = selected_theme
+    for key in cli_keys:
+        defaults.pop(key, None)
+    p.set_defaults(**defaults)
+    args = p.parse_args(argv)
 
     fmt = args.format or (os.path.splitext(args.output)[1].lstrip(".").lower() if args.output else "png")
     fmt = {"jpg": "jpeg"}.get(fmt, fmt)

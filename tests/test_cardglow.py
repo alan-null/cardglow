@@ -1,9 +1,17 @@
 import io
+import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from PIL import Image
 
 import cardglow
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "cardglow.py"
 
 
 def test_parse_padding_supports_css_shorthand():
@@ -27,6 +35,66 @@ def test_parse_size_rejects_invalid_dimensions(value):
     with pytest.raises(ValueError):
         width, height = cardglow.parse_size(value)
         assert width > 0 and height > 0
+
+
+def test_resolve_config_supports_custom_theme_and_json_keys(tmp_path):
+    config = tmp_path / "cardglow.json"
+    config.write_text(
+        json.dumps({
+            "theme": "brand",
+            "themes": {
+                "brand": {
+                    "bg-top": "112233",
+                    "no-grid": True,
+                }
+            },
+            "options": {"size": "640x360"},
+        }),
+        encoding="utf-8",
+    )
+
+    options, selected = cardglow.resolve_config(str(config))
+
+    assert selected == "brand"
+    assert options["bg_top"] == "112233"
+    assert options["no_grid"] is True
+    assert options["size"] == "640x360"
+
+
+def test_cli_config_values_can_be_overridden(tmp_path):
+    source = tmp_path / "logo.png"
+    config = tmp_path / "cardglow.toml"
+    output = tmp_path / "card.png"
+    Image.new("RGBA", (24, 16), (30, 120, 220, 255)).save(source)
+    config.write_text(
+        "size = \"32x16\"\ntransparent = true\nno_grid = true\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            str(source),
+            "--config",
+            str(config),
+            "--size",
+            "48x24",
+            "--opaque",
+            "--grid",
+            "-o",
+            str(output),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    with Image.open(output) as image:
+        assert image.size == (48, 24)
+        assert image.mode == "RGB"
 
 
 def test_autocrop_transparent_margins():

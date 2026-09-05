@@ -44,6 +44,7 @@ logo's dominant color and tints the background glow to match.
 - **Auto background removal** — optionally strip a flat/near-uniform background (e.g. a product photo on white) before compositing, so it doesn't clash with the card's own background.
 - **Auto color-matched glow** — samples the logo's dominant color, no manual hex-picking needed (or override with `--glow`).
 - **Watermark & provenance metadata** — stamp a corner or full-page tiled text watermark, and embed author / copyright / custom fields in the file itself.
+- **Config files & themes** — reuse JSON/TOML settings with `--config`, or select built-in and custom visual themes with `--theme`.
 - **Angled gradient background** — CSS `linear-gradient()`-style `--gradient-angle`, dithered to avoid banding on narrow color ranges.
 - **Subtle dot grid, vignette, drop shadow** — the same details that make GitHub's own OG cards feel polished.
 - **No local installs** — ships as a Docker image; only dependency on your machine is Docker itself.
@@ -69,6 +70,8 @@ chmod +x cardglow-docker.sh
 ```
 cardglow <input> [options]
 
+  --config PATH            Load settings from a JSON or TOML file
+  --theme NAME             Use a built-in or config-defined theme
   -o, --output PATH       Output PNG path (default: <input>-og.png)
   --size WxH              Canvas size (default: 1200x630)
   --icon-size PX          Cap the logo's longest side in px
@@ -121,6 +124,38 @@ cardglow <input> [options]
   --metadata KEY=VALUE    Embed an extra metadata field (repeatable)
   --no-metadata           Write no metadata at all
 ```
+
+### Config files and themes
+
+Config files keep the same option names as the CLI, using underscores or
+hyphens. TOML and JSON are supported. Settings can be top-level or grouped
+under `options`:
+
+```toml
+theme = "neon"
+size = "1200x630"
+watermark = "example.com"
+watermark_tile = true
+
+[options]
+no_grid = true
+```
+
+Built-in themes are `midnight`, `paper`, `neon`, and `mono`. A config file can
+also define reusable themes:
+
+```toml
+theme = "brand"
+
+[themes.brand]
+bg_top = "10243f"
+bg_bottom = "071018"
+gradient_angle = 135
+glow = "35c8ff"
+```
+
+Precedence is built-in defaults, selected theme, config options, then explicit
+CLI options. Use `--theme` to override the theme selected by the config file.
 
 ### Protecting your assets
 
@@ -251,7 +286,7 @@ required:
 
 ```bash
 docker build --target test -t cardglow:test .
-docker run --rm -v "$PWD":/workspace -w /workspace --entrypoint pytest cardglow:test -q -p no:cacheprovider
+docker run --rm -v "$PWD":/workspace -w /workspace --entrypoint pytest cardglow:test -q
 ```
 
 ## Running without Docker
