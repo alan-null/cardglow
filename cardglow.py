@@ -611,8 +611,16 @@ def metadata_save_kwargs(fmt: str, meta: dict) -> dict:
 # ----------------------------------------------------------------------
 
 def parse_size(s: str) -> tuple:
-    w, h = s.lower().split("x")
-    return int(w), int(h)
+    parts = s.lower().split("x")
+    if len(parts) != 2:
+        raise ValueError(f"--size expects WIDTHxHEIGHT, got {s!r}")
+    try:
+        w, h = (int(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"--size expects integer dimensions, got {s!r}") from exc
+    if w <= 0 or h <= 0:
+        raise ValueError(f"--size dimensions must be positive, got {s!r}")
+    return w, h
 
 
 def main():
